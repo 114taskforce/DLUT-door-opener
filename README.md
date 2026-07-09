@@ -46,7 +46,9 @@
 | **默认cookie** | 代码开头宏定义 | 登录时设备提供的cookie |
 
 
-默认cookie在URL请求“https://sso.dlut.edu.cn/cas/login?service=http%3A%2F%2Fmenjin.dlut.edu.cn%2Fcser%2Fstatic%2Fmenjin%2Findex.html%3F_t%3D17788********”的请求标头中找到cookie栏复制
+默认cookie在URL请求“ https://sso.dlut.edu.cn/cas/login?service=http%3A%2F%2Fmenjin.dlut.edu.cn%2Fcser%2Fstatic%2Fmenjin%2Findex.html%3F_t%3D17788******** ”的请求标头中找到cookie栏复制
+
+
 目标宿舍门锁的设备编号在开锁后发送的sendRoomBatch包负载内，标题为“deviceCode”
 
 > 🔴 **注意**：校园网DUT-WLAN有额外的认证限制，无法直接使用，请连接其他可用WiFi（如手机开热点）。
