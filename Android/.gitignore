@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+
+# Kotlin
+.kotlin/
+
+# 本机配置(不要提交)
+local.properties
+
+# 签名密钥(本机生成,不要提交)
+keystore.properties
+release.keystore
+*.jks
+
+# 日志与临时文件
+*.log
+captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store
