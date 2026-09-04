@@ -1,6 +1,5 @@
-以下教程是为连接自己路由器的配置方法，连接校园网则只需要修改代码开头的全局变量
-
-目前学校网信中心给所有人添加了强制登录二次认证，需要输入图形验证码和短信验证码，如果联系网信中心解除二次认证即可继续使用，目前通过二次认证的配置方法已更新！
+release里是安卓程序，实现在手机上的快速开门（需要校园网环境），源码在Android文件夹内
+以下教程为ESP32连接自己路由器的配置方法，连接校园网则只需要修改代码开头的全局变量
 
 #  DUT 宿舍门禁自动开门系统
 运行在 ESP32-S3-N16R8 上的智能门禁系统，实现从校园网认证到自动开门的完整流程。
@@ -46,7 +45,7 @@
 | **默认cookie** | 代码开头宏定义 | 登录时设备提供的cookie |
 
 
-默认cookie在URL请求“ https://sso.dlut.edu.cn/cas/login?service=http%3A%2F%2Fmenjin.dlut.edu.cn%2Fcser%2Fstatic%2Fmenjin%2Findex.html%3F_t%3D17788******** ”的请求标头中找到cookie栏复制
+默认cookie在URL请求“ https://sso.dlut.edu.cn/cas/login?service=http%3A%2F%2Fmenjin.dlut.edu.cn%2Fcser%2Fstatic%2Fmenjin%2Findex.html%3F_t%3D17788******** ”的请求标头中找到cookie栏复制，用于通过强制二次认证
 
 
 目标宿舍门锁的设备编号在开锁后发送的sendRoomBatch包负载内，标题为“deviceCode”
