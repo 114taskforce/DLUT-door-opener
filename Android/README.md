@@ -1,4 +1,4 @@
-# 开门 App(大工宿舍门禁)
+# 宿舍门(大工宿舍门禁 App)
 
 从 ESP32 固件(`main.cpp` / `des.cpp`)移植到 Android 的门禁客户端:Kotlin + Jetpack Compose + OkHttp,协议与固件保持一致(CAS 登录、AUTH-SIGN 签名、DES 加密)。
 
