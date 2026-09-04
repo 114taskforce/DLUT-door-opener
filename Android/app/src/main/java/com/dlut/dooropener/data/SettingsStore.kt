@@ -36,6 +36,11 @@ class SettingsStore(context: Context) {
         get() = sp.getLong(KEY_LAST_AUTO_OPEN, 0L)
         set(v) = sp.edit().putLong(KEY_LAST_AUTO_OPEN, v).apply()
 
+    /** 最近一次登录尝试时间戳(毫秒),token 自动刷新的去重与冷却依据 */
+    var lastLoginAt: Long
+        get() = sp.getLong(KEY_LAST_LOGIN, 0L)
+        set(v) = sp.edit().putLong(KEY_LAST_LOGIN, v).apply()
+
     /** 持久化 cookie jar(JSON 字符串,含 shfb-token) */
     fun saveCookieJar(json: String) = sp.edit().putString(KEY_COOKIES, json).apply()
 
@@ -66,6 +71,7 @@ class SettingsStore(context: Context) {
         const val KEY_AUTO_OPEN = "auto_open"
         const val KEY_KEEP_BACKGROUND = "keep_background"
         const val KEY_LAST_AUTO_OPEN = "last_auto_open_at"
+        const val KEY_LAST_LOGIN = "last_login_at"
         const val KEY_COOKIES = "cookies"
         const val KEY_WEB_COOKIE_SSO = "web_cookie_sso"
         const val KEY_WEB_COOKIE_MENJIN = "web_cookie_menjin"

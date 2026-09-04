@@ -82,6 +82,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // 启动时静默自动登录,提前备好 token(无凭据/最近登录过则跳过)
+        vm.ensureTokenFresh()
         // 打开 APP 时自动触发一次开门(需在设置中打开「自动开门」;30 秒内去重)
         vm.autoOpenIfNeeded()
     }
@@ -92,6 +94,8 @@ class MainActivity : ComponentActivity() {
         launchingExternal = false
         // 从网页登录页返回后刷新信任 cookie 状态
         vm.refreshWebCookieStatus()
+        // 回到前台时若 token 已过期,后台静默补登录(10 分钟内登录过则跳过)
+        vm.ensureTokenFresh()
     }
 
     override fun onUserLeaveHint() {

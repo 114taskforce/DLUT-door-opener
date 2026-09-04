@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -114,6 +116,64 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissCookieEditor() = _uiState.update { it.copy(showCookieEditor = false) }
 
+    // ==================== token 自动维护 ====================
+
+    /** 登录互斥:静默刷新与开门/取设备流程并发登录时只执行一次 */
+    private val loginMutex = Mutex()
+
+    /** token 视为新鲜的有效期:10 分钟内登录过则不重复登录 */
+    private val TOKEN_FRESH_MS = 10 * 60_000L
+
+    /** 无 token 时静默登录的冷却期:失败后不反复锤登录接口 */
+    private val NO_TOKEN_RETRY_MS = 60_000L
+
+    /**
+     * 静默确保 token 新鲜(启动与回到前台时调用):
+     * 无凭据、最近登录过(成功或失败)则跳过;否则后台登录,不打扰用户。
+     */
+    fun ensureTokenFresh() {
+        if (!settings.hasCredentials()) return
+        val age = System.currentTimeMillis() - settings.lastLoginAt
+        val hasToken = !client.currentToken().isNullOrEmpty()
+        if (hasToken && age < TOKEN_FRESH_MS) return        // 最近登录过,视为仍有效
+        if (!hasToken && age < NO_TOKEN_RETRY_MS) return    // 失败冷却期内不重试
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    loginFresh(settings.account, settings.password)
+                }
+            } catch (e: Exception) {
+                // 静默失败:不弹错误,等回到前台或开门时再试
+                Log.w("DoorVM", "静默登录失败:${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 单飞登录:并发调用只执行一次真实登录;非 force 且 token 还新鲜时直接复用。
+     * 无论成败都记录尝试时间,供 ensureTokenFresh 去重/冷却。
+     */
+    private suspend fun loginFresh(
+        account: String,
+        password: String,
+        force: Boolean = false,
+        previousToken: String? = null,
+    ): String = loginMutex.withLock {
+        val cur = client.currentToken()
+        if (!force) {
+            val age = System.currentTimeMillis() - settings.lastLoginAt
+            if (!cur.isNullOrEmpty() && age < TOKEN_FRESH_MS) return cur
+        } else if (previousToken != null && !cur.isNullOrEmpty() && cur != previousToken) {
+            // 等锁期间静默刷新已换过 token,直接复用,避免二次登录
+            return cur
+        }
+        try {
+            client.login(account, password)
+        } finally {
+            settings.lastLoginAt = System.currentTimeMillis()
+        }
+    }
+
     // ==================== 开门 ====================
 
     /** 打开 APP 时若开关打开,自动触发一次开门(30 秒内去重,防旋转/快速重开重复触发) */
@@ -146,23 +206,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun openDoorProcessInternal(
+    private suspend fun openDoorProcessInternal(
         account: String,
         password: String,
         deviceCode: String,
     ): Pair<String, Boolean> {
         try {
-            // 复用已有 token,没有则先登录
+            // 复用已有 token,没有则先登录(与静默刷新共用单飞锁)
             var token = client.currentToken()
             if (token.isNullOrEmpty()) {
-                token = client.login(account, password)
+                token = loginFresh(account, password)
             }
 
             var r = client.openDoor(token, deviceCode, account)
             if (r.success) return "开门成功" to true
 
-            // 第一次失败:重新登录后重试一次
-            token = client.login(account, password)
+            // 第一次失败:强制重新登录后重试一次(等锁期间若静默刷新已换过 token 则直接复用)
+            token = loginFresh(account, password, force = true, previousToken = token)
             r = client.openDoor(token, deviceCode, account)
             if (r.success) return "开门成功(重试后)" to true
             return "开门失败:${shortMessage(r.body)}" to false
@@ -185,13 +245,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val r = withContext(Dispatchers.IO) {
                 try {
                     var token = client.currentToken()
-                    if (token.isNullOrEmpty()) token = client.login(st.account, st.password)
+                    if (token.isNullOrEmpty()) token = loginFresh(st.account, st.password)
                     client.fetchDeviceCodes(token, st.account) to null
                 } catch (e: Exception) {
                     // 设备列表接口校验会话(JSESSIONID),缓存的 token 可能对应已过期会话:
                     // 重新登录拿到新会话后重试一次(与开门流程一致)
                     try {
-                        val t2 = client.login(st.account, st.password)
+                        val t2 = loginFresh(st.account, st.password, force = true)
                         client.fetchDeviceCodes(t2, st.account) to null
                     } catch (e2: Exception) {
                         emptyList<String>() to e2.message
