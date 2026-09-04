@@ -121,8 +121,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 登录互斥:静默刷新与开门/取设备流程并发登录时只执行一次 */
     private val loginMutex = Mutex()
 
-    /** token 视为新鲜的有效期:10 分钟内登录过则不重复登录 */
-    private val TOKEN_FRESH_MS = 10 * 60_000L
+    /** token 视为新鲜的有效期:距获取 15 分钟内则不重复登录 */
+    private val TOKEN_FRESH_MS = 15 * 60_000L
 
     /** 无 token 时静默登录的冷却期:失败后不反复锤登录接口 */
     private val NO_TOKEN_RETRY_MS = 60_000L
@@ -212,11 +212,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         deviceCode: String,
     ): Pair<String, Boolean> {
         try {
-            // 复用已有 token,没有则先登录(与静默刷新共用单飞锁)
-            var token = client.currentToken()
-            if (token.isNullOrEmpty()) {
-                token = loginFresh(account, password)
-            }
+            // 先确保 token 新鲜:没有或距获取超过 15 分钟就重新登录,否则直接复用
+            // (与静默刷新共用单飞锁)
+            var token = loginFresh(account, password)
 
             var r = client.openDoor(token, deviceCode, account)
             if (r.success) return "开门成功" to true
@@ -244,8 +242,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _uiState.update { it.copy(fetchingDevices = true, deviceCandidates = null) }
             val r = withContext(Dispatchers.IO) {
                 try {
-                    var token = client.currentToken()
-                    if (token.isNullOrEmpty()) token = loginFresh(st.account, st.password)
+                    // 先确保 token 新鲜:没有或距获取超过 15 分钟就重新登录
+                    val token = loginFresh(st.account, st.password)
                     client.fetchDeviceCodes(token, st.account) to null
                 } catch (e: Exception) {
                     // 设备列表接口校验会话(JSESSIONID),缓存的 token 可能对应已过期会话:

@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
         launchingExternal = false
         // 从网页登录页返回后刷新信任 cookie 状态
         vm.refreshWebCookieStatus()
-        // 回到前台时若 token 已过期,后台静默补登录(10 分钟内登录过则跳过)
+        // 回到前台时若 token 已过期,后台静默补登录(15 分钟内获取过则跳过)
         vm.ensureTokenFresh()
     }
 
