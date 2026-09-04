@@ -46,6 +46,8 @@ class SettingsStore(context: Context) {
 
     fun loadCookieJar(): String? = sp.getString(KEY_COOKIES, null)
 
+    fun clearCookieJar() = sp.edit().remove(KEY_COOKIES).apply()
+
     /** 网页登录获得的信任设备 cookie(等价于固件 COOKIE_INPUT,用于二次认证) */
     var webCookieSso: String
         get() = sp.getString(KEY_WEB_COOKIE_SSO, "") ?: ""
@@ -61,8 +63,8 @@ class SettingsStore(context: Context) {
         sp.edit().remove(KEY_WEB_COOKIE_SSO).remove(KEY_WEB_COOKIE_MENJIN).apply()
     }
 
-    fun hasCredentials(): Boolean =
-        account.isNotBlank() && password.isNotBlank() && deviceCode.isNotBlank()
+    /** 凭据齐全 = 有账号密码即可(门锁编号会在开门流程自动获取补全) */
+    fun hasCredentials(): Boolean = account.isNotBlank() && password.isNotBlank()
 
     private companion object {
         const val KEY_ACCOUNT = "account"

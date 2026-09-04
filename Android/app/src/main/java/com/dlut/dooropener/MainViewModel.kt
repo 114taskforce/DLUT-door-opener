@@ -79,9 +79,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update { it.copy(webCookieRecorded = settings.hasWebCookie()) }
     }
 
+    /**
+     * 网页登录页返回后调用:清标记并立即强制静默补登录。
+     * 信任 cookie(CASTGC)生效时 CAS 全程透明 302、无需二次认证,直接换到新 token;
+     * 网页登录拿到的新 menjin cookie 也会在此被预置进请求 jar。
+     */
+    fun onWebLoginDone() {
+        if (!settings.hasCredentials()) return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    loginFresh(settings.account, settings.password, force = true)
+                }
+                _uiState.update {
+                    it.copy(status = "自动登录成功,Token 已刷新", statusKind = StatusKind.SUCCESS)
+                }
+            } catch (e: LoginException) {
+                // 认证不完整(如未勾选信任设备)时提示,由用户自行决定是否重试网页登录
+                _uiState.update {
+                    it.copy(status = "登录后仍失败:${e.message}", statusKind = StatusKind.FAIL)
+                }
+                Log.w("DoorVM", "网页登录后补登录失败:${e.message}")
+            } catch (e: Exception) {
+                Log.w("DoorVM", "网页登录后补登录异常:${e.message}")
+            }
+        }
+    }
+
+    /** 清除信任 Cookie + 活动会话 + WebView 登录态(完整登出:下次操作真正从零验证) */
     fun clearWebCookies() {
         settings.clearWebCookies()
-        _uiState.update { it.copy(webCookieRecorded = false, status = "已清除信任 Cookie") }
+        client.clearAllCookies()
+        settings.lastLoginAt = 0L
+        // 连 WebView 的 SSO 登录态一起清:否则「清除」后仍能借浏览器信任会话
+        // 免密免短信透传回 Cookie,密码错误也拦不住
+        try {
+            val cm = android.webkit.CookieManager.getInstance()
+            cm.removeAllCookies(null)
+            cm.flush()
+        } catch (e: Exception) {
+            Log.w("DoorVM", "清 WebView Cookie 失败:${e.message}")
+        }
+        _uiState.update {
+            it.copy(webCookieRecorded = false, status = "已完整登出,下次操作将重新登录")
+        }
     }
 
     // ==================== 信任 Cookie 编辑 ====================
@@ -191,7 +232,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val st = _uiState.value
         if (!settings.hasCredentials()) {
             _uiState.update {
-                it.copy(status = "请先在设置中填写账号、密码和门锁编号", statusKind = StatusKind.FAIL)
+                it.copy(status = "请先在设置中填写账号和密码", statusKind = StatusKind.FAIL)
             }
             return
         }
@@ -201,27 +242,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 openDoorProcessInternal(st.account, st.password, st.deviceCode)
             }
             _uiState.update {
-                it.copy(status = r.first, statusKind = if (r.second) StatusKind.SUCCESS else StatusKind.FAIL)
+                it.copy(
+                    status = r.first,
+                    statusKind = if (r.second) StatusKind.SUCCESS else StatusKind.FAIL,
+                )
             }
         }
     }
 
+    /**
+     * 完整开门流程 —— 匹配固件 GPIO0 按下逻辑(openDoorProcess):
+     * 先用现有 currentToken 直接尝试开门 → 失败才 updateToken(强制重登)再试一次。
+     * token 的定期更新不掺进按钮路径(对应固件 loop 里每小时的 checkAndUpdateToken,
+     * App 侧由启动/回前台的 ensureTokenFresh 以 15 分钟窗口承担)。
+     */
     private suspend fun openDoorProcessInternal(
         account: String,
         password: String,
         deviceCode: String,
     ): Pair<String, Boolean> {
         try {
-            // 先确保 token 新鲜:没有或距获取超过 15 分钟就重新登录,否则直接复用
-            // (与静默刷新共用单飞锁)
-            var token = loginFresh(account, password)
+            // 固件按按钮用的就是现成的 currentToken;为空则等同 setup 阶段的 updateToken
+            var token = client.currentToken()
+            if (token.isNullOrEmpty()) token = loginFresh(account, password)
 
-            var r = client.openDoor(token, deviceCode, account)
+            // 门锁编号未填时自动拉取设备列表补全(固件是写死编号,App 跟随账号)
+            var code = deviceCode
+            if (code.isBlank()) {
+                val codes = client.fetchDeviceCodes(token, account)
+                code = codes.firstOrNull().orEmpty()
+                if (code.isBlank()) return "开门失败:未能自动获取门锁编号" to false
+                settings.deviceCode = code
+                _uiState.update { it.copy(deviceCode = code) }
+                Log.i("DoorVM", "门锁编号已自动补全:$code")
+            }
+
+            var r = client.openDoor(token, code, account)
             if (r.success) return "开门成功" to true
 
-            // 第一次失败:强制重新登录后重试一次(等锁期间若静默刷新已换过 token 则直接复用)
+            // 第一次失败:updateToken(强制重登)后重试一次
             token = loginFresh(account, password, force = true, previousToken = token)
-            r = client.openDoor(token, deviceCode, account)
+            r = client.openDoor(token, code, account)
             if (r.success) return "开门成功(重试后)" to true
             return "开门失败:${shortMessage(r.body)}" to false
         } catch (e: LoginException) {
@@ -241,10 +302,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _uiState.update { it.copy(fetchingDevices = true, deviceCandidates = null) }
             val r = withContext(Dispatchers.IO) {
-                try {
-                    // 先确保 token 新鲜:没有或距获取超过 15 分钟就重新登录
-                    val token = loginFresh(st.account, st.password)
+                val result = try {
+                    // 点击「自动获取」每次都强制重新登录换新 token(带时间戳),再取编号
+                    val token = loginFresh(
+                        st.account, st.password,
+                        force = true, previousToken = client.currentToken(),
+                    )
                     client.fetchDeviceCodes(token, st.account) to null
+                } catch (e: LoginException) {
+                    // 登录本身失败(密码错/服务端限制):立即再登一次只会加重风控,直接报错
+                    emptyList<String>() to e.message
                 } catch (e: Exception) {
                     // 设备列表接口校验会话(JSESSIONID),缓存的 token 可能对应已过期会话:
                     // 重新登录拿到新会话后重试一次(与开门流程一致)
@@ -255,14 +322,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         emptyList<String>() to e2.message
                     }
                 }
+                result
             }
             _uiState.update {
+                val base = it.copy(fetchingDevices = false)
                 if (r.second != null) {
-                    it.copy(fetchingDevices = false, status = "获取失败:${r.second}")
+                    base.copy(status = "获取失败:${r.second}")
                 } else if (r.first.isEmpty()) {
-                    it.copy(fetchingDevices = false, status = "未获取到设备编号,请手动输入")
+                    base.copy(status = "未获取到设备编号,请手动输入")
                 } else {
-                    it.copy(fetchingDevices = false, deviceCandidates = r.first)
+                    base.copy(deviceCandidates = r.first)
                 }
             }
         }

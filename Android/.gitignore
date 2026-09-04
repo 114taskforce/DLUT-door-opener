@@ -11,6 +11,7 @@ build/
 
 # 本机配置(不要提交)
 local.properties
+probe.txt
 
 # 签名密钥(本机生成,不要提交)
 keystore.properties
@@ -23,3 +24,4 @@ captures/
 .externalNativeBuild/
 .cxx/
 .DS_Store
+env

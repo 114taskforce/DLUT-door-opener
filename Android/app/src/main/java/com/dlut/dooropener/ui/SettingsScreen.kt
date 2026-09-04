@@ -102,7 +102,7 @@ fun SettingsScreen(
             OutlinedTextField(
                 value = state.deviceCode,
                 onValueChange = onDeviceCodeChange,
-                label = { Text("门锁编号") },
+                label = { Text("门锁编号(留空开门时自动补全)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -159,7 +159,7 @@ fun SettingsScreen(
             Text("二次认证(信任设备)", style = MaterialTheme.typography.titleMedium)
             Text(
                 if (state.webCookieRecorded)
-                    "已记录信任 Cookie(网页登录获得),开门时会自动使用"
+                    "已记录信任 Cookie:自动登录直接放行,token 超 15 分钟自动续取;「清除」会连同活动会话一起清掉(等效登出)"
                 else
                     "未记录。若开门提示需要二次认证,请打开网页登录一次",
                 style = MaterialTheme.typography.bodySmall,

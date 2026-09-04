@@ -7,6 +7,7 @@ import okhttp3.CookieJar
 import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
@@ -20,7 +21,8 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
-class LoginException(message: String) : Exception(message)
+/** needWebLogin=true 表示失败原因是需要二次认证,引导用户走网页登录 */
+class LoginException(message: String, val needWebLogin: Boolean = false) : Exception(message)
 
 /** 开门结果 */
 data class OpenResult(val success: Boolean, val code: Int, val body: String)
@@ -47,8 +49,8 @@ class DoorClient(
         /** AUTH-SIGN 的签名密钥 */
         const val SIGN_SECRET = "#2323dsfadfewrasa3434#"
 
-        const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        /** 与 ESP 固件逐字符一致的 UA(服务端按 UA 分类请求,自报完整浏览器串反而可疑) */
+        const val USER_AGENT = "Mozilla/5.0"
 
         /**
          * ESP 固件用了 setInsecure();若 sso.dlut.edu.cn 证书不在系统信任链导致 TLS 失败,
@@ -153,6 +155,8 @@ class DoorClient(
             store.add(Cookie.Builder().name(name).value(value).hostOnlyDomain(host).path("/").build())
         }
 
+        fun clearAll() = store.clear()
+
         fun serialize(): String {
             val arr = JSONArray()
             for (c in store) {
@@ -210,6 +214,9 @@ class DoorClient(
     val client: OkHttpClient = run {
         val builder = OkHttpClient.Builder()
             .cookieJar(cookieJar)
+            // 与 ESP 固件/浏览器一致走 HTTP/1.1:OkHttp 默认协商 h2,
+            // 服务端网关对 h2 的登录请求曾稳定回 invalid request
+            .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -239,30 +246,54 @@ class DoorClient(
 
     fun persistCookies() = settings.saveCookieJar(cookieJar.serialize())
 
+    /** 清空内存与持久化的全部 Cookie(等效登出:信任 CASTGC、活动会话、token 一起没了) */
+    fun clearAllCookies() {
+        cookieJar.clearAll()
+        settings.clearCookieJar()
+    }
+
     // ==================== CAS 登录 ====================
 
     /**
      * CAS 登录(与 ESP 固件 login() 相同流程):
-     * 0. 预置网页登录拿到的信任设备 cookie(固件 COOKIE_INPUT 等价,用于二次认证)
+     * 0. 预置网页登录拿到的信任设备 cookie(固件 COOKIE_INPUT 等价;为空即裸登录)
      * 1. GET 登录页提取 lt / execution
      * 2. rsa = strEnc(账号+密码+lt, "1", "2", "3")
-     * 3. POST 登录,OkHttp 自动跟随 302 到 menjin 换取 ticket
+     * 3. POST 登录(不自动跟随重定向,读 Location 手动换取 ticket,与固件一致)
      * 4. 访问门禁首页使 shfb-token 落进 cookie
      * 若信任 cookie 有效,GET 会被 CAS 直接 302 放行(无登录表单),自动跳过 POST
      * 成功返回 token,失败抛 [LoginException]
      */
-    @Throws(IOException::class)
     fun login(username: String, password: String): String {
-        // STEP0 预置信任设备 cookie(固件 COOKIE_INPUT 等价)
+        // STEP0 预置信任设备 cookie(固件 COOKIE_INPUT 等价;为空则等效裸登录)
         preloadWebCookies()
 
         val loginUrl = "$SSO_BASE/cas/login?service=$SERVICE"
 
-        // STEP1 获取登录页(信任 cookie 有效时,CAS 直接 302 到 menjin,OkHttp 自动跟随)
-        val page = get(loginUrl)
+        // STEP1 获取登录页 —— 仿固件:不自动跟随重定向,手动处理 Location。
+        // 信任 cookie(CASTGC 等)有效时 CAS 直接 302 到 menjin 带 ticket,全程透明无二次认证
+        var page: String
+        client.newBuilder().followRedirects(false).build().newCall(
+            Request.Builder().url(loginUrl).header("User-Agent", USER_AGENT).build()
+        ).execute().use { r ->
+            val loc = r.header("Location")?.let { raw -> r.request.url.resolve(raw) }
+            page = when {
+                // 被 302(无论是否门禁站):手动访问目标地址拿响应
+                loc != null -> {
+                    Log.i(TAG, "STEP1 GET 登录页被 302 → $loc")
+                    get(loc.toString())
+                }
+                else -> r.body?.string() ?: ""
+            }
+        }
         val lt = extract(page, "name=\"lt\" value=\"", "\"")
         val execution = extract(page, "name=\"execution\" value=\"", "\"")
         Log.i(TAG, "STEP1 GET 登录页: len=${page.length} lt=${if (lt.isEmpty()) "无" else "有"} exec=${if (execution.isEmpty()) "无" else "有"}")
+        // 记录登录页表单字段与提示关键词,判断服务端是否要求验证码/二次认证
+        Log.i(
+            TAG,
+            "STEP1 页面线索: 字段=[${formNames(page)}] ${pageHints(page)}",
+        )
 
         if (lt.isNotEmpty() && execution.isNotEmpty()) {
             // STEP2 加密
@@ -280,24 +311,71 @@ class DoorClient(
                 .add("_eventId", "submit")
                 .build()
 
-            val resp = client.newCall(
-                Request.Builder()
-                    .url(loginUrl)
-                    .header("User-Agent", USER_AGENT)
-                    .header("Origin", SSO_BASE)
-                    .header("Referer", "$SSO_BASE/cas/login")
-                    .post(body)
-                    .build()
-            ).execute()
+            // STEP3 POST 登录 —— 与固件一致:不自动跟随重定向,手动读 Location 判断
+            // (OkHttp 自动跟随时曾观察到 200 空响应体停在 sso,看不到服务端真实指示)
+            val resp = client.newBuilder()
+                .followRedirects(false)
+                .build()
+                .newCall(
+                    Request.Builder()
+                        .url(loginUrl)
+                        .header("User-Agent", USER_AGENT)
+                        .header("Origin", SSO_BASE)
+                        .header("Referer", "$SSO_BASE/cas/login")
+                        .post(body)
+                        .build()
+                ).execute()
             resp.use {
-                // 登录成功会 302 到 menjin;失败则停留在 sso(200 错误页)
-                Log.i(
-                    TAG,
-                    "STEP3 POST 登录结果: code=${it.code} 最终host=${it.request.url.host} cookies=${cookieSummary()}",
-                )
-                if (!it.isSuccessful || it.request.url.host != "menjin.dlut.edu.cn") {
-                    throw LoginException("账号或密码错误,或需要二次认证(可到设置页用网页登录)")
+                val location = it.header("Location")
+                val target = location?.let { raw -> it.request.url.resolve(raw) }
+                Log.i(TAG, "STEP3 POST 原始响应: code=${it.code} Location=$location cookies=${cookieSummary()}")
+                if (target == null || target.host != "menjin.dlut.edu.cn") {
+                    val page = it.body?.string().orEmpty()
+                    val flat = page.replace(Regex("\\s+"), " ")
+                    Log.w(TAG, "STEP3 未跳转门禁站, 最终URL=${it.request.url} len=${page.length} ${pageHints(page)}")
+                    val isFormPage = page.contains("name=\"lt\"")
+                    // 含 lt 的 200 页 = CAS 重新渲染登录表单(错误写进 #errormsghide,
+                    // 如密码错/账号锁定/需验证码);不含 lt 的是短信/动态码二阶段页
+                    val serverErr = if (isFormPage) {
+                        Regex("id=\"errormsghide\"[^>]*>([^<]{1,200})<")
+                            .find(page)?.groupValues?.get(1)?.trim().orEmpty()
+                    } else {
+                        var i = 0; var n = 0
+                        while (i < page.length) {
+                            Log.i("DoorPage", "PART${n++}: ${page.substring(i, minOf(i + 900, page.length))}")
+                            i += 900
+                        }
+                        ""
+                    }
+                    Log.w(TAG, "STEP3 服务端提示: [$serverErr] 片段: ${flat.take(300)}")
+                    // 不带 cookie 的裸登录同样报此错时,说明是服务端对账号/来源的临时风控
+                    if (serverErr.contains("invalid request", true)) {
+                        throw LoginException(
+                            "登录暂时被服务端限制(invalid request),稍后会自动重试;已有会话时开门/取编号不受影响",
+                            needWebLogin = false,
+                        )
+                    }
+                    // 表单登录被拦截时,若预置 cookie(网页登录抓取)里有 shfb-token,
+                    // 它与刚建立的浏览器会话同源,固件 STEP6 同款思路直接复用
+                    val preset =
+                        if (settings.webCookieMenjin.contains("shfb-token")) currentToken() else null
+                    if (!preset.isNullOrEmpty()) {
+                        Log.w(TAG, "STEP3 改用预置 cookie 中的 token(len=${preset.length})")
+                        get(indexUrl())
+                        persistCookies()
+                        return preset
+                    }
+                    throw LoginException(
+                        when {
+                            !isFormPage -> "账密已通过,需短信二次认证(可在设置页网页登录一次)"
+                            serverErr.isNotEmpty() -> "CAS 拒绝登录:$serverErr"
+                            else -> "登录被拒绝(服务端无提示,可能账号或密码错误)"
+                        },
+                        needWebLogin = true,
+                    )
                 }
+                // STEP4 手动访问 ticket 回跳地址,换取门禁会话(等价固件 httpGET(location))
+                get(target.toString())
             }
         }
         // 无 lt/execution:信任设备 cookie 已让 CAS 直接放行,无需表单登录
@@ -309,7 +387,7 @@ class DoorClient(
         // STEP5 提取 token
         val token = currentToken()
         if (token.isNullOrEmpty()) {
-            throw LoginException("登录后未获得 shfb-token(建议到设置页用网页登录完成二次认证)")
+            throw LoginException("登录后未获得 shfb-token(将打开网页登录完成认证)", needWebLogin = true)
         }
         persistCookies()
         Log.i(TAG, "STEP5 拿到 token(len=${token.length})")
@@ -360,7 +438,7 @@ class DoorClient(
      */
     @Throws(IOException::class)
     fun openDoor(token: String, deviceCode: String, personId: String): OpenResult {
-        // 时间戳:手机端本地时间(不走网络时间同步)
+        // 时间戳:手机本地时间
         val ts = System.currentTimeMillis().toString()
         // rand:与 ESP randomString(4) 完全一致(62 字符集均匀随机,必须符合该生成逻辑)
         val rand = randomString(4)
@@ -482,5 +560,20 @@ class DoorClient(
         val start = s + left.length
         val e = html.indexOf(right, start)
         return if (e == -1) "" else html.substring(start, e)
+    }
+
+    /** 登录页表单里出现的 input 字段名(诊断是否新增验证码等字段) */
+    private fun formNames(html: String): String =
+        Regex("name=\"([^\"]+)\"").findAll(html).map { it.groupValues[1] }
+            .distinct().joinToString(",")
+
+    /** 扫描响应页中的认证/报错关键词 */
+    private fun pageHints(html: String): String {
+        val hints = listOf(
+            "二次认证", "二次校验", "短信", "动态码", "验证码", "captcha", "verifyCode",
+            "密码错误", "密码不正确", "账号或密码", "不正确", "锁定", "失败", "信任",
+        )
+        val hits = hints.filter { html.contains(it, ignoreCase = true) }
+        return "关键词命中=[${hits.joinToString(",")}]"
     }
 }

@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -39,6 +40,8 @@ import com.dlut.dooropener.ui.DoorAppTheme
  * 登录成功跳转到 menjin 后自动抓取两站 cookie 并保存(固件 COOKIE_INPUT 等价)。
  */
 class WebLoginActivity : ComponentActivity() {
+
+    private companion object { const val TAG = "DoorClient" }
 
     private var finished = false
     private val handler = Handler(Looper.getMainLooper())
@@ -99,6 +102,7 @@ class WebLoginActivity : ComponentActivity() {
         val store = SettingsStore(this)
         store.webCookieSso = sso
         store.webCookieMenjin = menjin
+        Log.i(TAG, "网页登录抓取: sso含CASTGC=${sso.contains("CASTGC")} menjin含token=${menjin.contains("shfb-token")}")
         if (sso.isEmpty() && menjin.isEmpty()) {
             Toast.makeText(this, "未获取到 Cookie,请确认已登录成功", Toast.LENGTH_LONG).show()
         } else {
@@ -112,7 +116,7 @@ class WebLoginActivity : ComponentActivity() {
         finish()
     }
 
-    /** 用户手动返回时兜底:若已登录拿到 CASTGC 但没跳转到门禁页,也保存 */
+    /** 用户手动返回时兜底:若已登录拿到 CASTGC/shfb-token 但没触发门禁页抓取,也保存 */
     override fun onDestroy() {
         super.onDestroy()
         // 退出网页登录页时清空 WebView 页面缓存(应用体积大头;Cookie 不受影响)
@@ -121,11 +125,22 @@ class WebLoginActivity : ComponentActivity() {
         pendingHarvest?.let { handler.removeCallbacks(it) }
         if (finished) return
         val cm = CookieManager.getInstance()
-        val sso = cm.getCookie("https://sso.dlut.edu.cn/cas/login") ?: ""
-        if (sso.contains("CASTGC")) {
+        cm.flush()
+        val sso = mergeCookies(
+            cm.getCookie("https://sso.dlut.edu.cn/cas/login"),
+            cm.getCookie("https://sso.dlut.edu.cn/"),
+        )
+        val menjin = mergeCookies(
+            cm.getCookie("http://menjin.dlut.edu.cn/cser/static/menjin/index.html"),
+            cm.getCookie("http://menjin.dlut.edu.cn/"),
+        )
+        if (sso.contains("CASTGC") || menjin.contains("shfb-token")) {
             val store = SettingsStore(this)
             store.webCookieSso = sso
-            store.webCookieMenjin = cm.getCookie("http://menjin.dlut.edu.cn/") ?: ""
+            store.webCookieMenjin = menjin
+            Log.i(TAG, "退出兜底: Cookie 已保存 sso含CASTGC=${sso.contains("CASTGC")} menjin含token=${menjin.contains("shfb-token")}")
+        } else {
+            Log.w(TAG, "退出兜底: 未发现 CASTGC/shfb-token,登录可能未完成,不保存")
         }
     }
 
@@ -207,7 +222,7 @@ private fun WebLoginScreen(
                 .padding(padding)
         ) {
             Text(
-                text = "请在网页中完成登录(含二次认证),登录成功跳转到门禁页后自动记录 Cookie",
+                text = "请在网页中完成登录(含二次认证)。登录时请勾选「信任此设备」,之后 App 自动登录不再需要二次认证;登录成功跳转到门禁页后自动记录 Cookie",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),

@@ -90,12 +90,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val fromWebLogin = launchingWebLogin
         launchingWebLogin = false
         launchingExternal = false
         // 从网页登录页返回后刷新信任 cookie 状态
         vm.refreshWebCookieStatus()
-        // 回到前台时若 token 已过期,后台静默补登录(15 分钟内获取过则跳过)
-        vm.ensureTokenFresh()
+        if (fromWebLogin) {
+            // 网页登录完成:立即用信任 cookie 强制静默补登录,换新 token
+            vm.onWebLoginDone()
+        } else {
+            // 回到前台时若 token 已过期,后台静默补登录(15 分钟内获取过则跳过)
+            vm.ensureTokenFresh()
+        }
     }
 
     override fun onUserLeaveHint() {
