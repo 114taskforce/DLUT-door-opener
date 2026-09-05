@@ -27,8 +27,8 @@ android {
         applicationId = "com.dlut.dooropener"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.1.1"
     }
 
     signingConfigs {
@@ -46,7 +46,8 @@ android {
         release {
             // 没有本机密钥时构建未签名包,可自行用 apksigner 签名
             if (hasKeystore) signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
